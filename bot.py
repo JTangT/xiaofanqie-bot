@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, InvalidToken, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -277,6 +277,52 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("update %s caused error", update, exc_info=context.error)
 
 
+async def _preflight(token: str) -> bool:
+    """Verify the token and connectivity before starting the poll loop.
+
+    Uses its OWN short-lived ``Bot``/transport, which is shut down afterwards.
+    That matters for two reasons:
+
+    * The application's HTTP client is not touched here, so it is created and
+      used entirely inside the event loop that ``run_polling`` later starts.
+      Sharing one ``httpx.AsyncClient`` across two loops can leave pooled
+      connections bound to a closed loop.
+    * ``run_polling`` bootstraps by calling ``initialize()`` (which does its own
+      ``getMe``) *before* any ``post_init`` hook runs -- and on a bad token PTB
+      logs a full traceback and raises there. Checking beforehand is therefore
+      the only way to report the problem as one clear line.
+    """
+    from telegram import Bot
+
+    request = build_request()
+    bot = Bot(token, request=request)
+    try:
+        me = await call_with_retry(bot.get_me, description="getMe (preflight)", attempts=3)
+    except InvalidToken:
+        print(
+            "ERROR: Telegram rejected the token. Check TELEGRAM_BOT_TOKEN "
+            "(obtain one from @BotFather).",
+            file=sys.stderr,
+        )
+        return False
+    except TelegramError as exc:
+        print(
+            f"ERROR: cannot reach the Telegram API: {exc}\n"
+            "Check network connectivity, or set TELEGRAM_PROXY if a proxy is needed.",
+            file=sys.stderr,
+        )
+        return False
+    finally:
+        # Release the throwaway transport's connections.
+        try:
+            await request.shutdown()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+
+    logger.info("Authenticated as @%s (id=%s)", me.username, me.id)
+    return True
+
+
 def main() -> int:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -313,15 +359,23 @@ def main() -> int:
     application.add_handler(MessageHandler(filters.Document.ALL, on_document))
     application.add_error_handler(on_error)
 
+    # Validate the token and connectivity before entering the poll loop, so a
+    # misconfiguration produces one clear line rather than a PTB traceback.
+    if not asyncio.run(_preflight(token)):
+        return 1
+
     logger.info("Bot started, polling for updates…")
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        poll_interval=1.0,
-        timeout=POLL_TIMEOUT,
-        # Keep retrying the initial getMe on a flaky link instead of aborting.
-        bootstrap_retries=5,
-    )
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            poll_interval=1.0,
+            timeout=POLL_TIMEOUT,
+            # Retries the initial getMe on a flaky link.
+            bootstrap_retries=5,
+        )
+    except KeyboardInterrupt:
+        logger.info("Stopped by user")
     return 0
 
 

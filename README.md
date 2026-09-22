@@ -33,6 +33,8 @@ Python 实现与原 HTML 中的 JavaScript **逐像素完全一致**，由 `test
 
 ## 安装与运行
 
+### 方式一：本地 Python
+
 ```bash
 cd xiaofanqie-bot
 python3 -m venv .venv
@@ -41,6 +43,55 @@ python3 -m venv .venv
 export TELEGRAM_BOT_TOKEN="123456:ABC..."   # 从 @BotFather 获取
 .venv/bin/python bot.py
 ```
+
+### 方式二：Docker（推荐）
+
+```bash
+# 构建
+docker build -t xiaofanqie-bot .
+
+# 运行（token 在运行时注入，不会被打进镜像层）
+docker run -d --name xiaofanqie-bot \
+  -e TELEGRAM_BOT_TOKEN="123456:ABC..." \
+  --restart unless-stopped \
+  xiaofanqie-bot
+```
+
+或用 compose（从 `.env` 读取 token）：
+
+```bash
+cp .env.example .env
+# 编辑 .env 填入真实 token
+docker compose up -d --build
+docker compose logs -f
+```
+
+需要代理时（见下文「网络超时」）：
+
+```bash
+docker run -d -e TELEGRAM_BOT_TOKEN="..." \
+  -e TELEGRAM_PROXY=http://host.docker.internal:7890 \
+  --restart unless-stopped xiaofanqie-bot
+```
+
+镜像特点：
+
+| 项目 | 说明 |
+|---|---|
+| 基础镜像 | `python:3.13-slim-bookworm`，与本项目开发测试的解释器一致 |
+| 体积 | 约 318 MB（基础镜像 184 MB + numpy/Pillow 约 105 MB） |
+| 运行用户 | 非 root（`botuser`, uid 10001） |
+| 端口/卷 | 不需要。长轮询模式无需暴露端口，也无状态需持久化 |
+| 健康检查 | `healthcheck.py` 会真的调一次 `getMe`，而不是只看进程是否存活 |
+| 密钥 | `.env` 已在 `.dockerignore` 中排除，不会进入构建上下文或镜像层 |
+
+> **健康检查为什么这么写**：本项目实际遇到的故障是「进程活着但每次请求都超时」，
+> 所以只检查进程存活没有意义。`getMe` 能同时验证 token 有效和网络可达。
+> 注意 Docker 不会因为 unhealthy 就自动重启容器（那需要 Swarm 或 autoheal），
+> 它是给 `docker ps` 和监控看的信号。
+
+> **挂载目录时的权限**：容器以 uid 10001 运行，如果要用 `-v` 挂载目录跑 `cli.py`，
+> 宿主目录需要对该 uid 可写（例如 `chmod 777 <dir>`）。Bot 本身不需要挂载。
 
 ## 使用方法
 
@@ -176,9 +227,12 @@ REFERENCE_HTML=/path/to/小番茄图片混淆工具.html .venv/bin/python -m pyt
 image_confuse.py        算法核心：gilbert2d、置换、加解密、PIL 封装
 bot.py                  Telegram Bot：接收 document、解混淆、回传 PNG
 net.py                  网络容错：超时/连接池调优、重试退避、代理、上传串行化
+healthcheck.py          容器健康检查（真的调一次 getMe）
 cli.py                  命令行工具，批量加/解密
 tests/test_algorithm.py 算法测试，含与原 JavaScript 的差分验证
 tests/test_bot.py       Bot 处理流程与 CLI 测试
 tests/test_net.py       网络容错层测试
+Dockerfile / .dockerignore
+docker-compose.yml / .env.example
 requirements.txt        依赖
 ```

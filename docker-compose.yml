@@ -1,0 +1,32 @@
+services:
+  bot:
+    build: .
+    image: xiaofanqie-bot
+    container_name: xiaofanqie-bot
+    restart: unless-stopped
+    # Optional so that `TELEGRAM_BOT_TOKEN=... docker compose up` works too,
+    # without requiring a .env file to exist first.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Optional: route Telegram traffic through a proxy on a slow link.
+      # See README, "网络超时 / 连接失败".
+      - TELEGRAM_PROXY=${TELEGRAM_PROXY:-}
+      # Keep numpy/Pillow single-threaded per container; the bot already
+      # serialises uploads and uses a small worker pool.
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+    # No ports: the bot uses long polling, not webhooks.
+    # No volumes: nothing needs to persist between restarts.
+    security_opt:
+      - no-new-privileges:true
+    # The image already runs as a non-root user, but state it explicitly so
+    # the setting survives even if the image's USER line changes.
+    user: "10001:10001"
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 60s
+      timeout: 15s
+      start_period: 20s
+      retries: 3

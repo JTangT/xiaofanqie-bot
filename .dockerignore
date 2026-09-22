@@ -1,0 +1,31 @@
+# Keep the build context small and free of secrets.
+# Without this, .venv/ and .git/ get shipped to the daemon on every build.
+
+.git
+.gitignore
+
+# Virtualenvs and Python caches (never needed in the image)
+.venv
+venv
+myenv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Secrets: the token must be injected at runtime, never baked into a layer
+.env
+.env.*
+!.env.example
+
+# Local scratch images
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+out/
+tmp/

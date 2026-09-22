@@ -213,3 +213,102 @@ def test_bot_rejects_truncated_image_data():
     truncated = buf.getvalue()[:60]
     with pytest.raises(AlgorithmError):
         _process(truncated, "decrypt", "trunc.png")
+
+
+# --------------------------------------------------------------------------
+# Preflight (startup token / connectivity check)
+# --------------------------------------------------------------------------
+
+
+def _run_preflight(token, monkeypatch, fake_get_me):
+    """Run bot._preflight with Bot.get_me patched, returning (ok, stderr)."""
+    import asyncio
+    import contextlib
+
+    import bot as bot_module
+    from telegram import Bot
+
+    monkeypatch.setattr(Bot, "get_me", fake_get_me, raising=False)
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        ok = asyncio.run(bot_module._preflight(token))
+    return ok, buf.getvalue()
+
+
+def test_preflight_reports_bad_token_without_traceback(monkeypatch, capsys):
+    from telegram.error import InvalidToken
+
+    async def fake_get_me(self):
+        raise InvalidToken("rejected")
+
+    ok, err = _run_preflight("123:bad", monkeypatch, fake_get_me)
+    assert ok is False
+    assert "rejected the token" in err
+    # A traceback would make `docker logs` unreadable.
+    assert "Traceback" not in err
+
+
+def test_preflight_reports_network_failure_with_proxy_hint(monkeypatch):
+    from telegram.error import TimedOut
+
+    async def fake_get_me(self):
+        raise TimedOut("connect timed out")
+
+    ok, err = _run_preflight("123:ok", monkeypatch, fake_get_me)
+    assert ok is False
+    assert "cannot reach the Telegram API" in err
+    assert "TELEGRAM_PROXY" in err
+
+
+def test_preflight_succeeds_and_logs_username(monkeypatch, caplog):
+    import logging
+
+    class FakeMe:
+        username = "my_test_bot"
+        id = 42
+
+    async def fake_get_me(self):
+        return FakeMe()
+
+    with caplog.at_level(logging.INFO, logger="xiaofanqie-bot"):
+        ok, err = _run_preflight("123:ok", monkeypatch, fake_get_me)
+
+    assert ok is True
+    assert err == ""
+    assert "my_test_bot" in caplog.text
+
+
+def test_preflight_shuts_down_its_throwaway_transport(monkeypatch):
+    """The preflight transport must not leak connections."""
+    import asyncio
+
+    import bot as bot_module
+    from telegram import Bot
+
+    shutdown_called = []
+
+    class FakeMe:
+        username = "b"
+        id = 1
+
+    async def fake_get_me(self):
+        return FakeMe()
+
+    monkeypatch.setattr(Bot, "get_me", fake_get_me, raising=False)
+
+    real_build = bot_module.build_request
+
+    class TrackingRequest:
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def shutdown(self):
+            shutdown_called.append(True)
+            await self._inner.shutdown()
+
+    def tracking_build_request(*a, **kw):
+        return TrackingRequest(real_build(*a, **kw))
+
+    monkeypatch.setattr(bot_module, "build_request", tracking_build_request)
+    assert asyncio.run(bot_module._preflight("123:ok")) is True
+    assert shutdown_called == [True]
