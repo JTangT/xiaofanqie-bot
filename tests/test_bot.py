@@ -312,3 +312,49 @@ def test_preflight_shuts_down_its_throwaway_transport(monkeypatch):
     monkeypatch.setattr(bot_module, "build_request", tracking_build_request)
     assert asyncio.run(bot_module._preflight("123:ok")) is True
     assert shutdown_called == [True]
+
+
+# --------------------------------------------------------------------------
+# Event-loop regression (Python 3.12+ 'no current event loop' bug)
+# --------------------------------------------------------------------------
+
+
+def test_ensure_event_loop_restores_usable_loop_after_asyncio_run():
+    """Regression: asyncio.run() kills the thread's loop on 3.12+, which made
+    PTB's run_polling() raise "RuntimeError: There is no current event loop".
+    """
+    import asyncio
+
+    import bot as bot_module
+
+    async def _noop():
+        return True
+
+    # Reproduce the failure sequence from main().
+    asyncio.run(_noop())
+    bot_module._ensure_event_loop()
+
+    # The exact call that PTB's run_polling makes internally must now work.
+    loop = asyncio.get_event_loop()
+    assert loop is not None and not loop.is_closed()
+
+
+def test_ensure_event_loop_is_idempotent_when_loop_exists():
+    """Calling it when a loop is already present must not replace it."""
+    import asyncio
+
+    import bot as bot_module
+
+    async def _use_existing_loop():
+        loop = asyncio.get_running_loop()
+        bot_module._ensure_event_loop()
+        return loop, asyncio.get_running_loop()
+
+    before, after = _run_async(_use_existing_loop)
+    assert before is after
+
+
+def _run_async(coro_factory):
+    import asyncio
+
+    return asyncio.run(coro_factory())

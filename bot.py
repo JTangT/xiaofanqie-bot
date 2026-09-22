@@ -323,6 +323,25 @@ async def _preflight(token: str) -> bool:
     return True
 
 
+def _ensure_event_loop() -> None:
+    """Guarantee a usable current event loop for this thread.
+
+    ``asyncio.run()`` closes the loop it created and, on Python 3.12+, leaves
+    the thread without a current event loop. PTB's ``run_polling()`` calls
+    ``asyncio.get_event_loop()`` internally, which on 3.12+ raises
+    "RuntimeError: There is no current event loop in thread 'MainThread'"
+    rather than creating one -- so any ``asyncio.run()`` beforehand breaks the
+    poll loop. Idempotent: does nothing when a usable loop already exists.
+    """
+    policy = asyncio.get_event_loop_policy()
+    try:
+        loop: asyncio.AbstractEventLoop | None = policy.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None or loop.is_closed():
+        asyncio.set_event_loop(policy.new_event_loop())
+
+
 def main() -> int:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -361,7 +380,14 @@ def main() -> int:
 
     # Validate the token and connectivity before entering the poll loop, so a
     # misconfiguration produces one clear line rather than a PTB traceback.
-    if not asyncio.run(_preflight(token)):
+    try:
+        ok = asyncio.run(_preflight(token))
+    finally:
+        # asyncio.run() closes its loop and leaves the thread without a current
+        # one on Python 3.12+, which would break run_polling() below.
+        _ensure_event_loop()
+
+    if not ok:
         return 1
 
     logger.info("Bot started, polling for updates…")
