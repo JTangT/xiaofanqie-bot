@@ -1,0 +1,8 @@
+python-telegram-bot~=21.6
+Pillow>=10.0
+numpy>=1.24
+
+# SOCKS5 proxy support is OPTIONAL and only needed if you use
+# TELEGRAM_PROXY=socks5://...  Install it with:
+#     .venv/bin/python -m pip install "httpx[socks]"
+# HTTP/HTTPS proxies (TELEGRAM_PROXY=http://...) work without it.
