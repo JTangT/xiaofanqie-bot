@@ -24,6 +24,20 @@ services:
     # The image already runs as a non-root user, but state it explicitly so
     # the setting survives even if the image's USER line changes.
     user: "10001:10001"
+    # Cap memory so a pathological image can never take the whole host down.
+    # Without a limit, an ARM host with 1-2 GB RAM was observed to lock up
+    # entirely. Measured pipeline peaks: 122 MB at 2 MP, 478 MB at 12 MP, so
+    # 768m gives headroom for the 8 MP default cap (MAX_PIXELS, ~320 MB) while
+    # keeping a runaway well inside a 1 GB host. If the container is ever
+    # OOM-killed it restarts cleanly instead of freezing the machine.
+    mem_limit: 768m
+    memswap_limit: 768m
+    # Unbounded json-file logs can fill a small disk over time.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 60s

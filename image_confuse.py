@@ -23,7 +23,9 @@ JavaScript, see tests/).
 
 from __future__ import annotations
 
+import array
 import math
+import os
 from functools import lru_cache
 
 import numpy as np
@@ -41,12 +43,26 @@ __all__ = [
 
 # Refuse absurd allocations (a Telegram document can be up to 20 MB of highly
 # compressible data, which would otherwise expand into an enormous canvas).
-# At this size an RGBA image plus its output and the index table need roughly
-# 1 GB, which is about the practical ceiling for a small VPS.
-MAX_PIXELS = 50_000_000
+#
+# Peak memory for the *whole* pipeline (decode -> permute -> re-encode PNG) was
+# measured at ~40 bytes per pixel: 122 MB at 2 MP, 478 MB at 12 MP. 8 MP keeps
+# the worst case near 320 MB, which fits a 512 MB container with headroom, and
+# still covers everything Telegram realistically delivers -- a compressed photo
+# is ~1 MP and a 4K screenshot is ~8 MP. Override with the MAX_PIXELS
+# environment variable if your host has RAM to spare.
+DEFAULT_MAX_PIXELS = 8_000_000
 
-# Distinct (width, height) index tables kept in memory. Each costs
-# 4 * width * height bytes.
+try:
+    MAX_PIXELS = int(os.environ.get("MAX_PIXELS", "").strip() or DEFAULT_MAX_PIXELS)
+    if MAX_PIXELS <= 0:
+        raise ValueError
+except ValueError:
+    MAX_PIXELS = DEFAULT_MAX_PIXELS
+
+# Distinct (width, height) index tables kept in memory. Each costs 4 bytes per
+# pixel (46 MB at 12 MP), so keep this small on memory-constrained hosts. Two
+# is enough in practice: photos from one device tend to share dimensions.
+_CACHE_SIZE = 2
 _CACHE_SIZE = 8
 
 
@@ -54,17 +70,26 @@ class AlgorithmError(ValueError):
     """Raised when an image cannot be processed by the algorithm."""
 
 
-def gilbert2d(width: int, height: int) -> list[tuple[int, int]]:
-    """Generate the generalized Hilbert curve as a list of ``(x, y)`` points.
+def _build_curve(width: int, height: int) -> array.array:
+    """Hilbert curve as flat pixel indices ``x + y * width``, in visit order.
 
     Direct port of the reference ``gilbert2d`` / ``generate2d``. Visits every
-    pixel of the ``width`` x ``height`` rectangle exactly once, and works for
-    non-square and odd-sized images.
+    pixel exactly once; works for non-square and odd-sized images.
+
+    Memory matters a lot here. The obvious way to collect the coordinates is a
+    Python ``list`` of ``(x, y)`` tuples, and that is a bomb: at 12 MP the list
+    alone costs ~1.2 GB (roughly 100 bytes per tuple), which is enough to OOM
+    a small VPS and take the whole host down with it. An ``array.array`` of
+    int64 is contiguous and costs 8 bytes per pixel instead (~96 MB at 12 MP).
+
+    ``gilbert2d`` below decodes its ``(x, y)`` pairs from this array, so there
+    is exactly one implementation of the curve and the two views can never
+    drift apart.
     """
     if width <= 0 or height <= 0:
         raise AlgorithmError(f"invalid dimensions: {width}x{height}")
 
-    coordinates: list[tuple[int, int]] = []
+    flat: array.array = array.array("q")
 
     def generate(x: int, y: int, ax: int, ay: int, bx: int, by: int) -> None:
         w = abs(ax + ay)
@@ -76,14 +101,14 @@ def gilbert2d(width: int, height: int) -> list[tuple[int, int]]:
 
         if h == 1:
             for _ in range(w):
-                coordinates.append((x, y))
+                flat.append(x + y * width)
                 x += dax
                 y += day
             return
 
         if w == 1:
             for _ in range(h):
-                coordinates.append((x, y))
+                flat.append(x + y * width)
                 x += dbx
                 y += dby
             return
@@ -123,7 +148,19 @@ def gilbert2d(width: int, height: int) -> list[tuple[int, int]]:
     else:
         generate(0, 0, 0, height, width, 0)
 
-    return coordinates
+    return flat
+
+
+def gilbert2d(width: int, height: int) -> list[tuple[int, int]]:
+    """Generate the generalized Hilbert curve as a list of ``(x, y)`` points.
+
+    Convenience/inspection view over :func:`_build_curve`, kept for parity with
+    the reference implementation's API. Prefer :func:`gilbert_curve_indices`
+    for real work -- this one materialises a tuple per pixel and therefore has
+    the large memory footprint described above.
+    """
+    flat = _build_curve(width, height)
+    return [(int(i) % width, int(i) // width) for i in flat]
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
@@ -138,11 +175,12 @@ def gilbert_curve_indices(width: int, height: int) -> np.ndarray:
     """
     count = width * height
     dtype = np.int32 if count <= np.iinfo(np.int32).max else np.int64
-    coordinates = gilbert2d(width, height)
-    flat = np.fromiter(
-        (x + y * width for x, y in coordinates), dtype=dtype, count=count
+    # _build_curve returns an int64 array.array; copy into the narrow dtype so
+    # the cached array is as small as possible. The array.array itself is
+    # released as soon as this function returns.
+    return np.frombuffer(_build_curve(width, height), dtype=np.int64).astype(
+        dtype, copy=True
     )
-    return flat
 
 
 def _confusion_offset(pixel_count: int) -> int:
